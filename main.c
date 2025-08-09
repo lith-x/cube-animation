@@ -1,12 +1,14 @@
+#include <math.h>
 #include <stdint.h>
 
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
 #include "raylib.h"
 
-#define CUBE_SIZE 0.5f
-#define PADDING 10.0f
-#define SPEED 5.0f
+#define SPHERE_SIZE 3.0f
+#define PADDING 0.00001f
+#define MIN_SPEED 1.0f
+#define MAX_SPEED 5.0f
 #define XOR_MAGIC 0x2545F4914F6CDD1D
 #define DEFAULT_SEED 12345
 #define X_MIN 50.0f
@@ -15,6 +17,13 @@
 #define Y_MAX 30.0f
 #define Z_MIN -30.0f
 #define Z_MAX 30.0f
+#define CUBE_SPACING 4.0f
+#define CUBE_SIDE_LEN 5.0f - 2 * PADDING
+#define SPHERE_POOL_SIZE 15
+#define MIN_SPAWN_DELAY 0.05f
+#define MAX_SPAWN_DELAY 0.1f
+#define EPSILON 0.1f
+#define MAX_CUBE_SIZE 3.0f
 
 // todo: feed some unique value to this at runtime
 static uint32_t xorshift_state = DEFAULT_SEED;
@@ -31,15 +40,15 @@ typedef struct Point {
         DIRECTION_LEN = 6
     } direction;
     Color color;
-    float timer_secs;
     int is_spawned;
+    float speed;
     struct Point *next;
 } Point;
 
-typedef struct PointActiveArray {
-    int count;
-    Point **array; // array of pointers to points.. uh....
-} PointActiveArray;
+// typedef struct PointActiveArray {
+//     int count;
+//     Point **array; // array of pointers to points.. uh....
+// } PointArray;
 
 typedef struct PointFreeList {
     Point *head;
@@ -47,7 +56,6 @@ typedef struct PointFreeList {
 } PointFreeList;
 
 static inline float dir_to_start_pos(Point *p) {
-    float *xyz = (float *)&p->position;
     switch (p->direction) {
     case X_POSITIVE:
         return X_MIN;
@@ -80,7 +88,7 @@ static inline float next_randf(float min, float max) {
     return min + (max - min) * (float)next_rand() / (float)UINT32_MAX;
 }
 
-float *get_dir_coord_ptr(Point *p) {
+static inline float *get_point_dir_xyz_ptr(Point *p) {
     float *ptr = (float *)&p->position;
     switch (p->direction) {
     case Z_POSITIVE:
@@ -95,50 +103,21 @@ float *get_dir_coord_ptr(Point *p) {
     return ptr;
 }
 
-static inline int is_negative_dir(Point *p) {
-    return p->direction & (X_NEGATIVE | Y_NEGATIVE | Z_NEGATIVE);
-}
-
-Point *new_point(Arena *arena, PointFreeList *frie) {
-    Point *p = arena_alloc(arena, sizeof(Point));
-    p->is_spawned = 0;
-    return p;
-}
-
-void reset_point(Point *p) {}
-
-void update_point(Point *p, float dt) {
-    float *override = get_dir_coord_ptr(p);
-    float negative =
-        p->direction & (X_NEGATIVE | Y_NEGATIVE | Z_NEGATIVE) ? -1.0f : 1.0f;
-    *override += negative * SPEED * dt;
-}
-
-void free_point(PointFreeList *frie, Point *p) {
-    p->is_spawned = 0;
+// NOTE: avoid duplication by checking is_spawned on point before calling
+void free_point(PointFreeList *frie, Point *point) {
+    point->is_spawned = 0;
     if (!frie->head) {
-        frie->head = p;
-        frie->tail = p;
+        frie->head = point;
+        frie->tail = point;
     } else {
-        frie->tail->next = p;
-        frie->tail = p;
+        frie->tail->next = point;
+        frie->tail = point;
     }
 }
 
-void collect_free_points_and_bounds_check(PointActiveArray *points, PointFreeList *frie) {
-    for (int i = 0; i < points->count; i++) {
-        Point *p = points->array[i];
-        if (!p->is_spawned || p->position.x <= X_MIN ||
-            p->position.x >= X_MAX || p->position.y <= Y_MIN ||
-            p->position.y >= Y_MAX || p->position.z <= Z_MIN ||
-            p->position.z >= Z_MAX)
-            free_point(frie, p);
-    }
-}
-
-Point *spawn_point(PointFreeList *frie) {
+void spawn_point_if_available(PointFreeList *frie) {
     if (!frie->head)
-        return NULL;
+        return;
     Point *p = frie->head;
     frie->head = frie->head->next;
 
@@ -148,28 +127,32 @@ Point *spawn_point(PointFreeList *frie) {
                             next_randf(Z_MIN, Z_MAX)};
     uint32_t color = next_rand() | 0xFF000000;
     p->color = *(Color *)&color;
-    p->timer_secs = next_randf(0.5f, 3.0f);
+    p->speed = next_randf(MIN_SPEED, MAX_SPEED);
 
     p->direction = 1 << (next_rand() % DIRECTION_LEN);
-    float *override = get_dir_coord_ptr(p);
+    float *override = get_point_dir_xyz_ptr(p);
     *override = dir_to_start_pos(p);
     p->next = NULL;
-    return p;
 }
 
-#define SPHERE_POOL_SIZE 500
-#define SPAWN_CHANCE 50
+static inline Vector3 quantize_vec(Vector3 v, float scale) {
+    return (Vector3){floorf(v.x / scale) * scale, floorf(v.y / scale) * scale,
+                     floorf(v.z / scale) * scale};
+}
+
+static inline float sq_distance(Vector3 a, Vector3 b) {
+    return (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z);
+}
 
 int main() {
-    Arena arena = {0};
+    // Arena arena = {0};
 
-    PointActiveArray *active_points =
-        arena_alloc(&arena, sizeof(PointActiveArray));
-    active_points->array =
-        arena_alloc(&arena, SPHERE_POOL_SIZE * sizeof(Point));
+    Point points[SPHERE_POOL_SIZE] = {0};
+
+    PointFreeList frie = {0};
 
     for (int i = 0; i < SPHERE_POOL_SIZE; i++) {
-        active_points->array[i] = new_point(&arena);
+        free_point(&frie, &points[i]);
     }
 
     Camera3D camera = {.position = (Vector3){0.0f, 0.0f, 0.0f},
@@ -179,27 +162,66 @@ int main() {
                        .projection = CAMERA_PERSPECTIVE};
 
     InitWindow(800, 600, "hi");
+    float spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
+    spawn_point_if_available(&frie);
     float dt;
-    Point *point;
     SetTargetFPS(GetMonitorRefreshRate(GetCurrentMonitor()));
+    char count_text[20];
     while (!WindowShouldClose()) {
+        int point_count = 0;
         dt = GetFrameTime();
+        spawn_timer -= dt;
+        if (spawn_timer <= 0.0f) {
+            spawn_point_if_available(&frie);
+            spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
+        }
         BeginDrawing();
         ClearBackground(BLACK);
 
         BeginMode3D(camera);
         for (int i = 0; i < SPHERE_POOL_SIZE; i++) {
-            Point *p = active_points->array[i];
+            Point *p = &points[i];
             if (!p->is_spawned)
                 continue;
-            DrawSphere(active_points->array[i]->position, CUBE_SIZE,
-                       active_points->array[i]->color);
+            point_count++;
+
+            // update point position
+            float *override = get_point_dir_xyz_ptr(p);
+            float negative =
+                p->direction & (X_NEGATIVE | Y_NEGATIVE | Z_NEGATIVE) ? -1.0f
+                                                                      : 1.0f;
+            *override += negative * p->speed * dt;
+
+            // bounds check
+            if (p->position.x < X_MIN || p->position.x > X_MAX ||
+                p->position.y < Y_MIN || p->position.y > Y_MAX ||
+                p->position.z < Z_MIN || p->position.z > Z_MAX)
+                free_point(&frie, p);
+
+            for (int z = Z_MIN; z < Z_MAX; z += CUBE_SPACING) {
+                for (int y = Y_MIN; y < Y_MAX; y += CUBE_SPACING) {
+                    for (int x = X_MIN; x < X_MAX; x += CUBE_SPACING) {
+                        // uint32_t color = next_rand();
+                        float side_len = 5.0f / sq_distance((Vector3){x, y, z}, p->position);
+                        if (side_len < EPSILON) side_len = 0.0f;
+                        else if (side_len > MAX_CUBE_SIZE) side_len = MAX_CUBE_SIZE;
+
+                        DrawCubeWires((Vector3){x - side_len / 2.0f, y - side_len / 2.0f, z - side_len / 2.0f}, side_len, side_len, side_len, WHITE);
+                        // DrawCubeWires(
+                        //     (Vector3){x + PADDING, y + PADDING, z + PADDING},
+                        //     CUBE_SIDE_LEN, CUBE_SIDE_LEN, CUBE_SIDE_LEN,
+                        //     *(Color *)&color);
+                    }
+                }
+            }
         }
         EndMode3D();
+        sprintf(count_text, "%d", point_count);
+        DrawText(count_text, 5, 5, 15, SKYBLUE);
         EndDrawing();
     }
     CloseWindow();
-    arena_free(&arena);
+    // arena_free(&arena);
     return 0;
 }
 
