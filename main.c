@@ -6,9 +6,8 @@
 #include "raylib.h"
 
 #define SPHERE_SIZE 3.0f
-#define PADDING 0.00001f
-#define MIN_SPEED 1.0f
-#define MAX_SPEED 5.0f
+#define MIN_SPEED 18.0f
+#define MAX_SPEED 25.0f
 #define XOR_MAGIC 0x2545F4914F6CDD1D
 #define DEFAULT_SEED 12345
 #define X_MIN 50.0f
@@ -18,12 +17,11 @@
 #define Z_MIN -30.0f
 #define Z_MAX 30.0f
 #define CUBE_SPACING 4.0f
-#define CUBE_SIDE_LEN 5.0f - 2 * PADDING
-#define SPHERE_POOL_SIZE 15
+#define SPHERE_POOL_SIZE 4
 #define MIN_SPAWN_DELAY 0.05f
 #define MAX_SPAWN_DELAY 0.1f
 #define EPSILON 0.1f
-#define MAX_CUBE_SIZE 3.0f
+#define MAX_CUBE_SIZE 0.75f
 
 // todo: feed some unique value to this at runtime
 static uint32_t xorshift_state = DEFAULT_SEED;
@@ -155,10 +153,10 @@ int main() {
         free_point(&frie, &points[i]);
     }
 
-    Camera3D camera = {.position = (Vector3){0.0f, 0.0f, 0.0f},
+    Camera3D camera = {.position = (Vector3){-100.0f, 0.0f, 0.0f},
                        .target = (Vector3){1.0f, 0.0f, 0.0f},
                        .up = (Vector3){0.0f, 0.0f, 1.0f},
-                       .fovy = 75.0f,
+                       .fovy = 30.0f,
                        .projection = CAMERA_PERSPECTIVE};
 
     InitWindow(800, 600, "hi");
@@ -201,22 +199,17 @@ int main() {
             for (int z = Z_MIN; z < Z_MAX; z += CUBE_SPACING) {
                 for (int y = Y_MIN; y < Y_MAX; y += CUBE_SPACING) {
                     for (int x = X_MIN; x < X_MAX; x += CUBE_SPACING) {
-                        // uint32_t color = next_rand();
-                        float side_len = 5.0f / sq_distance((Vector3){x, y, z}, p->position);
-                        if (side_len < EPSILON) side_len = 0.0f;
+                        float side_len = 3.0f / sq_distance((Vector3){x, y, z}, p->position);
+                        if (side_len < EPSILON) continue;
                         else if (side_len > MAX_CUBE_SIZE) side_len = MAX_CUBE_SIZE;
-
-                        DrawCubeWires((Vector3){x - side_len / 2.0f, y - side_len / 2.0f, z - side_len / 2.0f}, side_len, side_len, side_len, WHITE);
-                        // DrawCubeWires(
-                        //     (Vector3){x + PADDING, y + PADDING, z + PADDING},
-                        //     CUBE_SIDE_LEN, CUBE_SIDE_LEN, CUBE_SIDE_LEN,
-                        //     *(Color *)&color);
+                        DrawSphere((Vector3){x, y, z}, side_len, p->color);
+                        // DrawCubeWires((Vector3){x, y, z}, side_len, side_len, side_len, WHITE);
                     }
                 }
             }
         }
         EndMode3D();
-        sprintf(count_text, "%d", point_count);
+        sprintf(count_text, "spheres: %d\nfps: %d", point_count, GetFPS());
         DrawText(count_text, 5, 5, 15, SKYBLUE);
         EndDrawing();
     }
