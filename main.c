@@ -1,8 +1,11 @@
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 
-#define ARENA_IMPLEMENTATION
-#include "arena.h"
+// #define ARENA_IMPLEMENTATION
+// #include "arena.h"
 #include "raylib.h"
 
 #define SPHERE_SIZE 3.0f
@@ -10,18 +13,18 @@
 #define MAX_SPEED 25.0f
 #define XOR_MAGIC 0x2545F4914F6CDD1D
 #define DEFAULT_SEED 12345
-#define X_MIN 50.0f
-#define X_MAX 100.0f
-#define Y_MIN -30.0f
-#define Y_MAX 30.0f
-#define Z_MIN -30.0f
-#define Z_MAX 30.0f
+#define X_MIN -50.0f
+#define X_MAX 50.0f
+#define Y_MIN -50.0f
+#define Y_MAX 50.0f
+#define Z_MIN -50.0f
+#define Z_MAX 50.0f
 #define CUBE_SPACING 4.0f
-#define SPHERE_POOL_SIZE 4
-#define MIN_SPAWN_DELAY 0.05f
-#define MAX_SPAWN_DELAY 0.1f
+#define SPHERE_POOL_SIZE 50
+#define MIN_SPAWN_DELAY 0.025f
+#define MAX_SPAWN_DELAY 0.05f
 #define EPSILON 0.1f
-#define MAX_CUBE_SIZE 0.75f
+#define MAX_CUBE_SIZE 1.25f
 
 // todo: feed some unique value to this at runtime
 static uint32_t xorshift_state = DEFAULT_SEED;
@@ -40,6 +43,7 @@ typedef struct Point {
     Color color;
     int is_spawned;
     float speed;
+    float intensity;
     struct Point *next;
 } Point;
 
@@ -104,6 +108,7 @@ static inline float *get_point_dir_xyz_ptr(Point *p) {
 // NOTE: avoid duplication by checking is_spawned on point before calling
 void free_point(PointFreeList *frie, Point *point) {
     point->is_spawned = 0;
+    point->position = (Vector3){FLT_MAX, FLT_MAX, FLT_MAX};
     if (!frie->head) {
         frie->head = point;
         frie->tail = point;
@@ -121,10 +126,13 @@ void spawn_point_if_available(PointFreeList *frie) {
 
     p->is_spawned = 1;
 
-    p->position = (Vector3){next_randf(X_MIN, X_MAX), next_randf(Y_MIN, Y_MAX),
-                            next_randf(Z_MIN, Z_MAX)};
-    uint32_t color = next_rand() | 0xFF000000;
-    p->color = *(Color *)&color;
+    float px = X_MIN + remainderf(next_rand(), X_MAX - X_MIN);
+    float py = Y_MIN + remainderf(next_rand(), Y_MAX - Y_MIN);
+    float pz = Z_MIN + remainderf(next_rand(), Z_MAX - Z_MIN);
+    p->position = (Vector3){px, py, pz};
+    p->color =
+        ColorLerp((Color){0xC7, 0x51, 0x08, 0xFF},
+                  (Color){0x61, 0x0C, 0xCF, 0xFF}, next_randf(0.0f, 1.0f));
     p->speed = next_randf(MIN_SPEED, MAX_SPEED);
 
     p->direction = 1 << (next_rand() % DIRECTION_LEN);
@@ -139,7 +147,8 @@ static inline Vector3 quantize_vec(Vector3 v, float scale) {
 }
 
 static inline float sq_distance(Vector3 a, Vector3 b) {
-    return (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z);
+    return (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) +
+           (b.z - a.z) * (b.z - a.z);
 }
 
 int main() {
@@ -153,8 +162,10 @@ int main() {
         free_point(&frie, &points[i]);
     }
 
-    Camera3D camera = {.position = (Vector3){-100.0f, 0.0f, 0.0f},
-                       .target = (Vector3){1.0f, 0.0f, 0.0f},
+    Camera3D camera = {.position = (Vector3){X_MIN * 5.0f, 0.0f, 30.0f},
+                       .target = (Vector3){(X_MAX + X_MIN) / 2.0f,
+                                           (Y_MAX + Y_MIN) / 2.0f,
+                                           (Z_MAX + Z_MIN) / 2.0f},
                        .up = (Vector3){0.0f, 0.0f, 1.0f},
                        .fovy = 30.0f,
                        .projection = CAMERA_PERSPECTIVE};
@@ -174,6 +185,7 @@ int main() {
             spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
         }
         BeginDrawing();
+        UpdateCamera(&camera, CAMERA_ORBITAL);
         ClearBackground(BLACK);
 
         BeginMode3D(camera);
@@ -199,11 +211,15 @@ int main() {
             for (int z = Z_MIN; z < Z_MAX; z += CUBE_SPACING) {
                 for (int y = Y_MIN; y < Y_MAX; y += CUBE_SPACING) {
                     for (int x = X_MIN; x < X_MAX; x += CUBE_SPACING) {
-                        float side_len = 3.0f / sq_distance((Vector3){x, y, z}, p->position);
-                        if (side_len < EPSILON) continue;
-                        else if (side_len > MAX_CUBE_SIZE) side_len = MAX_CUBE_SIZE;
-                        DrawSphere((Vector3){x, y, z}, side_len, p->color);
-                        // DrawCubeWires((Vector3){x, y, z}, side_len, side_len, side_len, WHITE);
+                        float side_len =
+                            5.0f / sq_distance((Vector3){x, y, z}, p->position);
+                        if (side_len < EPSILON)
+                            continue;
+                        else if (side_len > MAX_CUBE_SIZE)
+                            side_len = MAX_CUBE_SIZE;
+                        // DrawSphere((Vector3){x, y, z}, side_len, p->color);
+                        DrawCubeWires((Vector3){x, y, z}, side_len, side_len,
+                                      side_len, p->color);
                     }
                 }
             }
@@ -220,12 +236,16 @@ int main() {
 
 /*
 TODO list:
+ - create different function to determine side length of cubes (rather than
+   distance) to give it more of a bullet/beam flavor
+ - optimization(?): through tweaking, find max range for cubes, only iterate
+   over those per point
+ - port over to shader code maybe?
 
-- get timing down (introduce random cube every 1 to 3 seconds?)
-
-
-random elements:
-choose direction (out of 6)
-
+known bugs:
+ - cube blobs don't fade out properly, just pop out of existence (hits border
+   before out of render view)
+ - some cubes jitter in and out, especially at beginning
+ - point is centered BETWEEN two grid points, instead of being on a line
 
 */
