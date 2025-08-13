@@ -205,9 +205,10 @@ int main() {
     }
     Vector3 camera_pos = {X_MIN * 5.5f, 0.0f, 100.0f};
     Vector3 target_pos = {(X_MAX + X_MIN) / 2.0f, (Y_MAX + Y_MIN) / 2.0f,
-                           (Z_MAX + Z_MIN) / 2.0f};
+                          (Z_MAX + Z_MIN) / 2.0f};
     // cross product: (target_pos - camera_pos) x {0, 1, 0}
-    Vector3 up_dir = {camera_pos.z - target_pos.z, 0.0f, target_pos.x - camera_pos.x};
+    Vector3 up_dir = {camera_pos.z - target_pos.z, 0.0f,
+                      target_pos.x - camera_pos.x};
     Camera3D camera = {.position = camera_pos,
                        .target = target_pos,
                        .up = up_dir,
