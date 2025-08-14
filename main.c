@@ -4,45 +4,83 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define ARENA_IMPLEMENTATION
-#include "arena.h"
+// #define ARENA_IMPLEMENTATION
+// #include "arena.h"
 #include "raylib.h"
 
-#define MIN_SPEED 25.0f
-#define MAX_SPEED 50.0f
-#define XOR_MAGIC 0x2545F4914F6CDD1D
-#define DEFAULT_SEED 12345
-#define X_MIN -100.0f
-#define X_MAX 100.0f
-#define Y_MIN -100.0f
-#define Y_MAX 100.0f
-#define Z_MIN -100.0f
-#define Z_MAX 100.0f
-#define CUBE_SPACING 4.0f
-#define BULLET_POOL_SIZE 10
+#define BULLET_POOL_SIZE 5
+
+#define MIN_SPEED 20.0f
+#define MAX_SPEED 20.0f
 #define MIN_SPAWN_DELAY 0.1f
-#define MAX_SPAWN_DELAY 0.2f
+#define MAX_SPAWN_DELAY 0.5f
+
+#define CENTER ((Vector3){0.0f, 0.0f, 0.0f})
+
+#define CUBE_SIZE 4.0f
+#define CUBE_PADDING 0.25f
+
+#define GRID_X 50
+#define GRID_Y 50
+#define GRID_Z 50
+
+#define GETSIZE(x) ((CUBE_SIZE + CUBE_PADDING) * x - CUBE_PADDING)
+#define GRID_IDX(x, y, z) (z * GRID_X * GRID_Y + y * GRID_X + x)
+
+#define SIZE_X GETSIZE(GRID_X)
+#define SIZE_Y GETSIZE(GRID_Y)
+#define SIZE_Z GETSIZE(GRID_Z)
+
+#define CUBE_COUNT (GRID_X * GRID_Y * GRID_Z)
+
 #define EPSILON 0.1f
-#define MAX_CUBE_SIZE 2.0f
+
 #define MAX_BULLET_LENGTH 7.0f
 #define MIN_BULLET_LENGTH 3.0f
 #define MAX_BULLET_WIDTH 3.0f
 #define MIN_BULLET_WIDTH 1.0f
-#define GRID_X ((X_MAX - X_MIN) / CUBE_SPACING)
-#define GRID_Y ((Y_MAX - Y_MIN) / CUBE_SPACING)
-#define GRID_Z ((Z_MAX - Z_MIN) / CUBE_SPACING)
-#define CUBE_COUNT (int)(GRID_X * GRID_Y * GRID_Z)
-#define TAIL_MARK -1
+
+#define X_MIN (CENTER.x - SIZE_X / 2.0f)
+#define X_MAX (CENTER.x + SIZE_X / 2.0f)
+#define Y_MIN (CENTER.y - SIZE_Y / 2.0f)
+#define Y_MAX (CENTER.y + SIZE_Y / 2.0f)
+#define Z_MIN (CENTER.z - SIZE_Z / 2.0f)
+#define Z_MAX (CENTER.z + SIZE_Z / 2.0f)
+
+#define CUBE_SPACING 15.0f
+#define MAX_CUBE_SIZE 10.0f
+
+#define CUBE_COUNT (GRID_X * GRID_Y * GRID_Z)
+
+#define LIST_END_MARK -1
 #define SPAWNED_MARK -2
 
-// todo: feed some unique value to this at runtime
+// --------------------- RNG ---------------------
+
+// todo: feed some unique value to this at runtime?
+#define DEFAULT_SEED 12345
+#define XOR_MAGIC 0x2545F4914F6CDD1D
 static uint32_t xorshift_state = DEFAULT_SEED;
 
+// xorshift* https://rosettacode.org/wiki/Pseudo-random_numbers/Xorshift_star#C
+uint32_t next_rand() {
+    uint64_t x = xorshift_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    xorshift_state = x;
+    return (x * XOR_MAGIC) >> 32;
+}
+
+// --------------------- STRUCTS ---------------------
+
 typedef struct Points {
-    Vector3 positions[BULLET_POOL_SIZE]; // CPU/GPU
-    Vector3 scales[BULLET_POOL_SIZE];    // GPU
-    Color colors[BULLET_POOL_SIZE];      // GPU
-    enum Direction {
+    Vector3 positions[BULLET_POOL_SIZE];        // CPU/GPU
+    Vector3 scales[BULLET_POOL_SIZE];           // GPU
+    Color colors[BULLET_POOL_SIZE];             // GPU
+    float speeds[BULLET_POOL_SIZE];             // CPU
+    int next_free_or_spawned[BULLET_POOL_SIZE]; // CPU
+    enum Direction {                            // CPU
         X_POSITIVE = (uint8_t)0x01,
         X_NEGATIVE = (uint8_t)0x02,
         Y_POSITIVE = (uint8_t)0x04,
@@ -50,15 +88,19 @@ typedef struct Points {
         Z_POSITIVE = (uint8_t)0x10,
         Z_NEGATIVE = (uint8_t)0x20,
         DIRECTION_LEN = 6
-    } directions[BULLET_POOL_SIZE]; // CPU
-    float speeds[BULLET_POOL_SIZE]; // CPU
-    int next_free_or_spawned[BULLET_POOL_SIZE];
+    } directions[BULLET_POOL_SIZE];
 } Points;
 
 typedef struct BulletFreeList {
     int head_idx;
     int tail_idx;
 } BulletFreeList;
+
+// --------------------- INLINE UTIL FN'S ---------------------
+
+static inline float next_randf(float min, float max) {
+    return min + (max - min) * (float)next_rand() / (float)UINT32_MAX;
+}
 
 static inline float dir_to_start_pos(Points *p, int idx) {
     switch (p->directions[idx]) {
@@ -79,18 +121,8 @@ static inline float dir_to_start_pos(Points *p, int idx) {
     }
 }
 
-// xorshift* https://rosettacode.org/wiki/Pseudo-random_numbers/Xorshift_star#C
-uint32_t next_rand() {
-    uint64_t x = xorshift_state;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    xorshift_state = x;
-    return (x * XOR_MAGIC) >> 32;
-}
-
-static inline float next_randf(float min, float max) {
-    return min + (max - min) * (float)next_rand() / (float)UINT32_MAX;
+static inline int is_movement_positive(int dir) {
+    return dir & (X_POSITIVE | Y_POSITIVE | Z_POSITIVE);
 }
 
 static inline float *get_movement_axis(Vector3 *v, int dir) {
@@ -108,42 +140,58 @@ static inline float *get_movement_axis(Vector3 *v, int dir) {
     return ptr;
 }
 
+static inline float get_cube_pos(float n) {
+    return floorf(n / CUBE_SPACING) * CUBE_SPACING;
+}
+
+static inline Matrix ToTranslationMatrix(Vector3 v) {
+    return (Matrix){1.0f, 0.0f, 0.0f, v.x, 0.0f, 1.0f, 0.0f, v.y,
+                    0.0f, 0.0f, 1.0f, v.z, 0.0f, 0.0f, 0.0f, 1.0f};
+}
+
+static inline BoundingBox get_cube_range(Vector3 *position, Vector3 *scale) {
+    return (BoundingBox){
+        .min = {
+            position->x - scale->x
+        }
+    };
+}
+
+// --------------------- FREELIST/SPAWN HANDLING ---------------------
+
 void init_freelist(BulletFreeList *frie, Points *points) {
     for (int i = 0; i < BULLET_POOL_SIZE - 1; i++)
         points->next_free_or_spawned[i] = i + 1;
-    points->next_free_or_spawned[BULLET_POOL_SIZE - 1] = TAIL_MARK;
+    points->next_free_or_spawned[BULLET_POOL_SIZE - 1] = LIST_END_MARK;
     frie->head_idx = 0;
     frie->tail_idx = BULLET_POOL_SIZE - 1;
 }
 
 int alloc_bullet(BulletFreeList *frie, Points *points) {
-    if (frie->head_idx == TAIL_MARK)
-        return TAIL_MARK;
+    if (frie->head_idx == LIST_END_MARK)
+        return LIST_END_MARK;
     int idx = frie->head_idx;
     frie->head_idx = points->next_free_or_spawned[idx];
-    if (frie->head_idx == TAIL_MARK)
-        frie->tail_idx = TAIL_MARK; // see if this is necessary, basically
-                                    // "list emty" marker
+    if (frie->head_idx == LIST_END_MARK)
+        frie->tail_idx = LIST_END_MARK;
     points->next_free_or_spawned[idx] = SPAWNED_MARK;
     return idx;
 }
 
 void free_bullet(BulletFreeList *frie, Points *points, int idx) {
-    // todo: see if this is necessary? fixed some flickering before, but could
-    // get rid of this at some point this seems like a hacky placement, see if
-    // this is just an operations ordering problem
-    points->positions[idx] = (Vector3){FLT_MAX, FLT_MAX, FLT_MAX};
-    points->next_free_or_spawned[idx] = TAIL_MARK;
-    if (frie->tail_idx != TAIL_MARK)
+    points->positions[idx] = (Vector3){
+        FLT_MAX, FLT_MAX, FLT_MAX}; // prevent random background stutters
+    points->next_free_or_spawned[idx] = LIST_END_MARK;
+    if (frie->tail_idx != LIST_END_MARK)
         points->next_free_or_spawned[frie->tail_idx] = idx;
     else
         frie->head_idx = idx;
     frie->tail_idx = idx;
 }
 
-void spawn_point_if_available(BulletFreeList *frie, Points *points) {
+void spawn_bullet_if_available(BulletFreeList *frie, Points *points) {
     int idx = alloc_bullet(frie, points);
-    if (idx == TAIL_MARK)
+    if (idx == LIST_END_MARK)
         return;
 
     points->colors[idx] =
@@ -159,34 +207,19 @@ void spawn_point_if_available(BulletFreeList *frie, Points *points) {
         get_movement_axis(&points->scales[idx], points->directions[idx]);
     *scale_move_axis = next_randf(MIN_BULLET_LENGTH, MAX_BULLET_LENGTH);
 
-    float px =
-        floorf(CUBE_SPACING / 2.0f + next_randf(X_MIN, X_MAX) / CUBE_SPACING) *
-        CUBE_SPACING;
-    float py =
-        floorf(CUBE_SPACING / 2.0f + next_randf(Y_MIN, Y_MAX) / CUBE_SPACING) *
-        CUBE_SPACING;
-    float pz =
-        floorf(CUBE_SPACING / 2.0f + next_randf(Z_MIN, Z_MAX) / CUBE_SPACING) *
-        CUBE_SPACING;
-    points->positions[idx] = (Vector3){px, py, pz};
+    points->positions[idx] = (Vector3){
+        get_cube_pos(/*CUBE_SPACING / 2.0f +*/ next_randf(X_MIN, X_MAX)),
+        get_cube_pos(/*CUBE_SPACING / 2.0f +*/ next_randf(Y_MIN, Y_MAX)),
+        get_cube_pos(/*CUBE_SPACING / 2.0f +*/ next_randf(Z_MIN, Z_MAX))};
     float *pos_move_axis =
         get_movement_axis(&points->positions[idx], points->directions[idx]);
     *pos_move_axis =
         dir_to_start_pos(points, idx) +
-        ((points->directions[idx] & (X_NEGATIVE | Y_NEGATIVE | Z_NEGATIVE))
-             ? 1.0f
-             : -1.0f) *
+        (is_movement_positive(points->directions[idx]) ? -1.0f : 1.0f) *
             MAX_BULLET_LENGTH * (*scale_move_axis);
 }
 
-static inline Matrix ToTranslationMatrix(Vector3 v) {
-    return (Matrix){1.0f, 0.0f, 0.0f, v.x, 0.0f, 1.0f, 0.0f, v.y,
-                    0.0f, 0.0f, 1.0f, v.z, 0.0f, 0.0f, 0.0f, 1.0f};
-}
-
-static inline float get_cube_pos(float n) {
-    return floorf(n / CUBE_SPACING) * CUBE_SPACING;
-}
+// --------------------- MAIN ---------------------
 
 int main() {
     Points points = {0};
@@ -194,16 +227,17 @@ int main() {
     BulletFreeList frie = {0};
     init_freelist(&frie, &points);
 
-    Vector3 cubePositions[CUBE_COUNT];
+    Vector3 cube_positions[CUBE_COUNT];
     int cube_idx = 0;
-    for (float z = Z_MIN; z < Z_MAX; z += CUBE_SPACING) {
-        for (float y = Y_MIN; y < Y_MAX; y += CUBE_SPACING) {
-            for (float x = X_MIN; x < X_MAX; x += CUBE_SPACING) {
-                cubePositions[cube_idx++] = (Vector3){x, y, z};
+    for (float z = get_cube_pos(Z_MIN); z < Z_MAX; z += CUBE_SPACING) {
+        for (float y = get_cube_pos(Y_MIN); y < Y_MAX; y += CUBE_SPACING) {
+            for (float x = get_cube_pos(X_MIN); x < X_MAX; x += CUBE_SPACING) {
+                cube_positions[cube_idx++] = (Vector3){x, y, z};
             }
         }
     }
-    Vector3 camera_pos = {X_MIN * 5.5f, 0.0f, 100.0f};
+    Vector3 camera_pos = {-750.0f, (Y_MAX + Y_MIN) / 2.0f,
+                          (Z_MAX + Z_MIN) / 2.0f};
     Vector3 target_pos = {(X_MAX + X_MIN) / 2.0f, (Y_MAX + Y_MIN) / 2.0f,
                           (Z_MAX + Z_MIN) / 2.0f};
     // cross product: (target_pos - camera_pos) x {0, 1, 0}
@@ -215,12 +249,12 @@ int main() {
                        .fovy = 30.0f,
                        .projection = CAMERA_PERSPECTIVE};
 
-    InitWindow(800, 600, "hi");
-    float spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
-    spawn_point_if_available(&frie, &points);
     float dt;
-    SetTargetFPS(GetMonitorRefreshRate(GetCurrentMonitor()));
+    float spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
+    spawn_bullet_if_available(&frie, &points);
     char count_text[20];
+    InitWindow(800, 600, "hi");
+    SetTargetFPS(GetMonitorRefreshRate(GetCurrentMonitor()));
 
     // Mesh cube = GenMeshCube(20.0f, 20.0f, 20.0f);
     // Material mat = LoadMaterialDefault();
@@ -231,12 +265,13 @@ int main() {
     //     transforms[i] = ToTranslationMatrix(cubePositions[i]);
     // }
 
+    int highlight_cube_idx = 0;
     while (!WindowShouldClose()) {
         int bullet_count = 0;
         dt = GetFrameTime();
         spawn_timer -= dt;
         if (spawn_timer <= 0.0f) {
-            spawn_point_if_available(&frie, &points);
+            spawn_bullet_if_available(&frie, &points);
             spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
         }
         BeginDrawing();
@@ -244,61 +279,56 @@ int main() {
         ClearBackground(BLACK);
 
         BeginMode3D(camera);
-        DrawCube((Vector3){X_MAX, Y_MIN, Z_MIN}, 1.0f, 1.0f, 1.0f, WHITE);
-        DrawCube((Vector3){X_MAX, Y_MAX, Z_MIN}, 1.0f, 1.0f, 1.0f, WHITE);
-        DrawCube((Vector3){X_MAX, Y_MIN, Z_MAX}, 1.0f, 1.0f, 1.0f, WHITE);
-        DrawCube((Vector3){X_MAX, Y_MAX, Z_MAX}, 1.0f, 1.0f, 1.0f, WHITE);
+        DrawCubeWires(cube_positions[highlight_cube_idx++], CUBE_SIZE, CUBE_SIZE, CUBE_SIZE, WHITE);
+
         for (int i = 0; i < BULLET_POOL_SIZE; i++) {
             if (points.next_free_or_spawned[i] != SPAWNED_MARK)
                 continue;
             bullet_count++;
 
             // update point position
-            float *override =
+            float *pos_move_axis =
                 get_movement_axis(&points.positions[i], points.directions[i]);
-            float negative =
-                points.directions[i] & (X_NEGATIVE | Y_NEGATIVE | Z_NEGATIVE)
-                    ? -1.0f
-                    : 1.0f;
-            *override += negative * points.speeds[i] * dt;
+            *pos_move_axis +=
+                (is_movement_positive(points.directions[i]) ? 1.0f : -1.0f) *
+                points.speeds[i] * dt;
 
             float len_x = points.scales[i].x * MAX_BULLET_LENGTH;
             float len_y = points.scales[i].y * MAX_BULLET_LENGTH;
             float len_z = points.scales[i].z * MAX_BULLET_LENGTH;
+            float min_x = points.positions[i].x - len_x - MAX_CUBE_SIZE;
+            float max_x = points.positions[i].x + len_x + MAX_CUBE_SIZE;
+            float min_y = points.positions[i].y - len_y - MAX_CUBE_SIZE;
+            float max_y = points.positions[i].y + len_y + MAX_CUBE_SIZE;
+            float min_z = points.positions[i].z - len_z - MAX_CUBE_SIZE;
+            float max_z = points.positions[i].z + len_z + MAX_CUBE_SIZE;
 
             // bounds check
-            if (points.positions[i].x < X_MIN - len_x ||
-                points.positions[i].x > X_MAX + len_x ||
-                points.positions[i].y < Y_MIN - len_y ||
-                points.positions[i].y > Y_MAX + len_y ||
-                points.positions[i].z < Z_MIN - len_z ||
-                points.positions[i].z > Z_MAX + len_z)
+            if (max_x < X_MIN || min_x > X_MAX || max_y < Y_MIN ||
+                min_y > Y_MAX || max_z < Z_MIN || min_z > Z_MAX) {
                 free_bullet(&frie, &points, i);
+                continue;
+            }
 
-            float min_x =
-                fmaxf(X_MIN, get_cube_pos(points.positions[i].x - len_x));
-            float min_y =
-                fmaxf(Y_MIN, get_cube_pos(points.positions[i].y - len_y));
-            float min_z =
-                fmaxf(Z_MIN, get_cube_pos(points.positions[i].z - len_z));
-            float max_x =
-                fminf(X_MAX, get_cube_pos(points.positions[i].x + len_x));
-            float max_y =
-                fminf(Y_MAX, get_cube_pos(points.positions[i].y + len_y));
-            float max_z =
-                fminf(Z_MAX, get_cube_pos(points.positions[i].z + len_z));
+            int cube_min_x = get_cube_pos(fmaxf(X_MIN, min_x)) / CUBE_SPACING;
+            int cube_min_y = get_cube_pos(fmaxf(Y_MIN, min_y)) / CUBE_SPACING;
+            int cube_min_z = get_cube_pos(fmaxf(Z_MIN, min_z)) / CUBE_SPACING;
+            int cube_max_x = get_cube_pos(fminf(X_MAX, max_x)) / CUBE_SPACING;
+            int cube_max_y = get_cube_pos(fminf(Y_MAX, max_y)) / CUBE_SPACING;
+            int cube_max_z = get_cube_pos(fminf(Z_MAX, max_z)) / CUBE_SPACING;
             float scale_x = 1.0f / points.scales[i].x;
             float scale_y = 1.0f / points.scales[i].y;
             float scale_z = 1.0f / points.scales[i].z;
-            for (float z = min_z; z <= max_z; z += CUBE_SPACING) {
-                for (float y = min_y; y <= max_y; y += CUBE_SPACING) {
-                    for (float x = min_x; x <= max_x; x += CUBE_SPACING) {
-                        float dx =
-                            fabsf(((float)x - points.positions[i].x) * scale_x);
-                        float dy =
-                            fabsf(((float)y - points.positions[i].y) * scale_y);
-                        float dz =
-                            fabsf(((float)z - points.positions[i].z) * scale_z);
+            for (int z = cube_min_z; z < cube_max_z; z++) {
+                for (int y = cube_min_y; y < cube_max_y; y++) {
+                    for (int x = cube_min_x; x < cube_max_x; x++) {
+                        Vector3 *cube_pos = &cube_positions[GRID_IDX(x, y, z)];
+                        float dx = fabsf((cube_pos->x - points.positions[i].x) *
+                                         scale_x);
+                        float dy = fabsf((cube_pos->y - points.positions[i].y) *
+                                         scale_y);
+                        float dz = fabsf((cube_pos->z - points.positions[i].z) *
+                                         scale_z);
                         float dist = dx + dy + dz;
                         if (dist >= MAX_BULLET_LENGTH)
                             continue;
@@ -308,18 +338,70 @@ int main() {
                             continue;
                         else if (side_len > MAX_CUBE_SIZE)
                             side_len = MAX_CUBE_SIZE;
-                        // DrawSphere((Vector3){x, y, z}, side_len, p->color);
-                        DrawCubeWires((Vector3){x, y, z}, side_len, side_len,
-                                      side_len, points.colors[i]);
+                        DrawCubeWires(*cube_pos, side_len, side_len, side_len,
+                                      points.colors[i]);
                     }
                 }
             }
+            // for (int j = 0; j < CUBE_COUNT; j++) {
+            //     float dx = fabsf(((float)cube_positions[j].x -
+            //     points.positions[i].x) * scale_x); float dy =
+            //     fabsf(((float)cube_positions[j].y - points.positions[i].y) *
+            //     scale_y); float dz = fabsf(((float)cube_positions[j].z -
+            //     points.positions[i].z) * scale_z); float dist = dx + dy + dz;
+            //     if (dist >= MAX_BULLET_LENGTH) continue;
+            //     float side_len = MAX_CUBE_SIZE * (1.0f - dist /
+            //     MAX_BULLET_LENGTH); if (side_len < EPSILON) continue; else if
+            //     (side_len > MAX_CUBE_SIZE) side_len = MAX_CUBE_SIZE;
+            //     DrawCubeWires(cube_positions[j], side_len, side_len,
+            //     side_len, points.colors[i]);
+            // }
+            // for (float z = cube_min_z; z <= cube_max_z; z += CUBE_SPACING) {
+            //     for (float y = cube_min_y; y <= cube_max_y; y +=
+            //     CUBE_SPACING) {
+            //         for (float x = cube_min_x; x <= cube_max_x;
+            //              x += CUBE_SPACING) {
+            //             // get an octahedron (manhattan distance)
+            //             float dx =
+            //                 fabsf(((float)x - points.positions[i].x) *
+            //                 scale_x);
+            //             float dy =
+            //                 fabsf(((float)y - points.positions[i].y) *
+            //                 scale_y);
+            //             float dz =
+            //                 fabsf(((float)z - points.positions[i].z) *
+            //                 scale_z);
+            //             float dist = dx + dy + dz;
+            //             if (dist >= MAX_BULLET_LENGTH)
+            //                 continue;
+            //             float side_len =
+            //                 MAX_CUBE_SIZE * (1.0f - dist /
+            //                 MAX_BULLET_LENGTH);
+            //             if (side_len < EPSILON)
+            //                 continue;
+            //             else if (side_len > MAX_CUBE_SIZE)
+            //                 side_len = MAX_CUBE_SIZE;
+            //             DrawCubeWires((Vector3){x, y, z}, side_len, side_len,
+            //                           side_len, points.colors[i]);
+            //         }
+            //     }
+            // }
+            DrawSphere((Vector3)points.positions[i],
+                       fminf(points.scales[i].x,
+                             fminf(points.scales[i].y, points.scales[i].z)),
+                       points.colors[i]);
         }
+        // draw the border
+        DrawCube((Vector3){X_MAX, Y_MIN, Z_MIN}, 1.0f, 1.0f, 1.0f, WHITE);
+        DrawCube((Vector3){X_MAX, Y_MAX, Z_MIN}, 1.0f, 1.0f, 1.0f, WHITE);
+        DrawCube((Vector3){X_MAX, Y_MIN, Z_MAX}, 1.0f, 1.0f, 1.0f, WHITE);
+        DrawCube((Vector3){X_MAX, Y_MAX, Z_MAX}, 1.0f, 1.0f, 1.0f, WHITE);
         DrawCube((Vector3){X_MIN, Y_MIN, Z_MIN}, 1.0f, 1.0f, 1.0f, WHITE);
         DrawCube((Vector3){X_MIN, Y_MAX, Z_MIN}, 1.0f, 1.0f, 1.0f, WHITE);
         DrawCube((Vector3){X_MIN, Y_MIN, Z_MAX}, 1.0f, 1.0f, 1.0f, WHITE);
         DrawCube((Vector3){X_MIN, Y_MAX, Z_MAX}, 1.0f, 1.0f, 1.0f, WHITE);
         EndMode3D();
+
         sprintf(count_text, "spheres: %d\nfps: %d", bullet_count, GetFPS());
         DrawText(count_text, 5, 5, 15, SKYBLUE);
         EndDrawing();
@@ -330,14 +412,11 @@ int main() {
 
 /*
 TODO list:
- - optimization(?): through tweaking, find max range for cubes, only iterate
-   over those per point
-   - or just anything that doesn't go through every cube for every point (more
-     localized rendering strategies)
- - port over to shader code maybe?
+ - port over to shader code
+ - blend colors for intersecting bullets, perhaps
 
 known bugs:
- - if center point of bullet is near bounds, the cubes spawn outside of said
-   bounds
+ - possibly (probably) not z-indexing correctly
+   - hopefully the shader port will solve this
 
 */
