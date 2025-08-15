@@ -14,13 +14,15 @@
 
 #define CENTER ((Vector3){0.0f, 0.0f, 0.0f})
 
-// cube constants
-#define CUBE_SIZE 1.0f
-#define CUBE_PADDING 0.2f
+#define EPSILON 0.01f
 
-#define CUBES_X 10
-#define CUBES_Y 10
-#define CUBES_Z 10
+// cube constants
+#define CUBE_SIZE 0.5f
+#define CUBE_PADDING 0.1f
+
+#define CUBES_X 50
+#define CUBES_Y 50
+#define CUBES_Z 50
 #define CUBES_COUNT (CUBES_X * CUBES_Y * CUBES_Z)
 
 // note: SIZE_X is the scaling factor for bullet speed, radius, etc.
@@ -46,20 +48,20 @@
 #define CUBE_IDX(x, y, z) (CUBES_X * CUBES_Y * (z) + CUBES_X * (y) + (x))
 
 // bullet constants
-#define BULLET_POOL_SIZE 3
+#define BULLET_POOL_SIZE 100
 static const float MIN_SPEED = SIZE_X / 5.0f;
 static const float MAX_SPEED = MIN_SPEED * 2.0f;
 
 // we're good here, no scaling necessary
 static const float MIN_SPAWN_DELAY = 0.001f;
-static const float MAX_SPAWN_DELAY = 0.001f;
+static const float MAX_SPAWN_DELAY = 0.01f;
 
 // how many
-static const float MIN_BULLET_RADIUS = SIZE_X / 5.0f;
-static const float MAX_BULLET_RADIUS = MIN_BULLET_RADIUS; // * 2.0f;
+static const float MIN_BULLET_RADIUS = SIZE_X / 15.0f;
+static const float MAX_BULLET_RADIUS = MIN_BULLET_RADIUS * 2.0f;
 
 static const float MIN_BULLET_LEN = SIZE_X / 5.0f;
-static const float MAX_BULLET_LEN = MIN_BULLET_LEN; // * 2.0f;
+static const float MAX_BULLET_LEN = MIN_BULLET_LEN * 2.0f;
 
 #define FREELIST_END BULLET_POOL_SIZE
 #define IS_SPAWNED (BULLET_POOL_SIZE + 1)
@@ -121,6 +123,7 @@ static inline float get_sign(int dir) {
     return dir & (PX | PY | PZ) ? 1.0f : -1.0f;
 }
 
+// todo: refactor so we include the scale offset here, will probably look nicer
 static inline float get_start_pos(int dir) {
     switch (dir) {
     case NX:
@@ -164,18 +167,20 @@ static inline int is_out_of_bounds(Vector3 pos, Vector3 scale, int dir) {
 }
 
 static inline int world_to_index(float coord, float base_pos, int max_idx) {
+    // NOTE: idk why ceilf had to be used here but it fixed an off by -1 offset
+    // issue.
     int ret = (int)ceilf((coord - base_pos) / (CUBE_SIZE + CUBE_PADDING));
     return ret > max_idx ? max_idx : ret < 0 ? 0 : ret;
 }
 
 static inline BulletBox get_bullet_bounding_box(Vector3 pos, Vector3 scale) {
     return (BulletBox){
-        world_to_index(pos.x - scale.x, X_MIN_CUBE_CENTER, CUBES_X),
-        world_to_index(pos.x + scale.x, X_MIN_CUBE_CENTER, CUBES_X),
-        world_to_index(pos.y - scale.y, Y_MIN_CUBE_CENTER, CUBES_Y),
-        world_to_index(pos.y + scale.y, Y_MIN_CUBE_CENTER, CUBES_Y),
-        world_to_index(pos.z - scale.z, Z_MIN_CUBE_CENTER, CUBES_Z),
-        world_to_index(pos.z + scale.z, Z_MIN_CUBE_CENTER, CUBES_Z),
+        .min_x = world_to_index(pos.x - scale.x, X_MIN_CUBE_CENTER, CUBES_X),
+        .max_x = world_to_index(pos.x + scale.x, X_MIN_CUBE_CENTER, CUBES_X),
+        .min_y = world_to_index(pos.y - scale.y, Y_MIN_CUBE_CENTER, CUBES_Y),
+        .max_y = world_to_index(pos.y + scale.y, Y_MIN_CUBE_CENTER, CUBES_Y),
+        .min_z = world_to_index(pos.z - scale.z, Z_MIN_CUBE_CENTER, CUBES_Z),
+        .max_z = world_to_index(pos.z + scale.z, Z_MIN_CUBE_CENTER, CUBES_Z),
     };
 }
 
@@ -265,7 +270,7 @@ int main() {
     float dt = 0, spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
     char debug_text[256];
 
-    Camera3D camera = {.position = {200.0f, 0.0f, 0.0f},
+    Camera3D camera = {.position = {400.0f, 0.0f, 0.0f},
                        .target = CENTER,
                        .up = {0.0f, 1.0f, 0.0f},
                        .fovy = 5.0f,
@@ -284,14 +289,15 @@ int main() {
         }
         BeginDrawing();
         ClearBackground(BLACK);
+        // debug: keep track of bullet count
         int bullet_count = 0;
 
         // UpdateCamera(&camera, CAMERA_ORBITAL);
         BeginMode3D(camera);
         // debug: visualize cube grid
-        for (int i = 0; i < CUBES_COUNT; i++) {
-            DrawPoint3D(cube_positions[i], WHITE);
-        }
+        // for (int i = 0; i < CUBES_COUNT; i++) {
+        //     DrawPoint3D(cube_positions[i], WHITE);
+        // }
 
         for (int i = 0; i < BULLET_POOL_SIZE; i++) {
             if (bullets.next_free_or_spawned[i] != IS_SPAWNED)
@@ -302,28 +308,42 @@ int main() {
             ((float *)&bullets.positions[i])[get_xyz(dir)] +=
                 get_sign(dir) * bullets.speeds[i] * dt;
             if (is_out_of_bounds(bullets.positions[i], bullets.scales[i],
-                                 bullets.directions[i])) {
+                                 dir)) {
                 free_bullet(&frie, &bullets, i);
                 continue;
             }
             // debug: visualize bullet positions
-            // DrawPoint3D(bullets.positions[i], bullets.colors[i]);
-            DrawSphereEx(bullets.positions[i], CUBE_SIZE / 8.0f, 4, 4,
-                         bullets.colors[i]);
+            // DrawSphereEx(bullets.positions[i], CUBE_SIZE / 8.0f, 4, 4,
+            //              bullets.colors[i]);
 
             BulletBox bbox = get_bullet_bounding_box(bullets.positions[i],
                                                      bullets.scales[i]);
+            Vector3 *bullet_pos = &bullets.positions[i];
             for (int z = bbox.min_z; z < bbox.max_z; z++) {
                 for (int y = bbox.min_y; y < bbox.max_y; y++) {
                     for (int x = bbox.min_x; x < bbox.max_x; x++) {
-                        DrawCubeWires(cube_positions[CUBE_IDX(x, y, z)], CUBE_SIZE,
-                                      CUBE_SIZE, CUBE_SIZE, bullets.colors[i]);
+                        Vector3 *cube_pos = &cube_positions[CUBE_IDX(x, y, z)];
+                        float dx = fabsf((bullet_pos->x - cube_pos->x) /
+                                         bullets.scales[i].x);
+                        float dy = fabsf((bullet_pos->y - cube_pos->y) /
+                                         bullets.scales[i].y);
+                        float dz = fabsf((bullet_pos->z - cube_pos->z) /
+                                         bullets.scales[i].z);
+                        float d = dx + dy + dz;
+                        float side_len = fmaxf(0.0f, CUBE_SIZE * (1 - d));
+                        if (side_len <= EPSILON)
+                            continue;
+                        // debug: bypass side length calc, show all cubes
+                        // float side_len = CUBE_SIZE;
+                        DrawCubeWires(*cube_pos, side_len, side_len, side_len,
+                                      bullets.colors[i]);
                     }
                 }
             }
         }
         EndMode3D();
-        sprintf(debug_text, "bullets: %d", bullet_count);
+        // debug: show stats
+        sprintf(debug_text, "bullets: %d\nfps: %d", bullet_count, GetFPS());
         DrawText(debug_text, 5, 5, 16, SKYBLUE);
         EndDrawing();
     }
