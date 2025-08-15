@@ -1,7 +1,9 @@
 #include <float.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "raylib.h"
 
@@ -10,20 +12,54 @@
 #define WINDOW_WIDTH 600
 #define WINDOW_HEIGHT 800
 
+#define CENTER ((Vector3){0.0f, 0.0f, 0.0f})
+
+// cube constants
+#define CUBE_SIZE 1.0f
+#define CUBE_PADDING 0.2f
+
+#define CUBES_X 10
+#define CUBES_Y 10
+#define CUBES_Z 10
+#define CUBES_COUNT (CUBES_X * CUBES_Y * CUBES_Z)
+
+// note: SIZE_X is the scaling factor for bullet speed, radius, etc.
+#define GETLENGTH(x) ((CUBE_SIZE + CUBE_PADDING) * (x) - CUBE_PADDING)
+#define SIZE_X GETLENGTH(CUBES_X)
+#define SIZE_Y GETLENGTH(CUBES_Y)
+#define SIZE_Z GETLENGTH(CUBES_Z)
+
+#define X_MIN (CENTER.x - SIZE_X / 2.0f)
+#define X_MAX (CENTER.x + SIZE_X / 2.0f)
+#define Y_MIN (CENTER.y - SIZE_Y / 2.0f)
+#define Y_MAX (CENTER.y + SIZE_Y / 2.0f)
+#define Z_MIN (CENTER.z - SIZE_Z / 2.0f)
+#define Z_MAX (CENTER.z + SIZE_Z / 2.0f)
+
+#define X_MIN_CUBE_CENTER (X_MIN + CUBE_SIZE / 2.0f)
+#define X_MAX_CUBE_CENTER (X_MAX - CUBE_SIZE / 2.0f)
+#define Y_MIN_CUBE_CENTER (Y_MIN + CUBE_SIZE / 2.0f)
+#define Y_MAX_CUBE_CENTER (Y_MAX - CUBE_SIZE / 2.0f)
+#define Z_MIN_CUBE_CENTER (Z_MIN + CUBE_SIZE / 2.0f)
+#define Z_MAX_CUBE_CENTER (Z_MAX - CUBE_SIZE / 2.0f)
+
+#define CUBE_IDX(x, y, z) (CUBES_X * CUBES_Y * (z) + CUBES_X * (y) + (x))
+
 // bullet constants
-#define BULLET_POOL_SIZE 5
-static const float MIN_SPEED = 0; // todo: figure this shit out
-static const float MAX_SPEED = 0;
+#define BULLET_POOL_SIZE 3
+static const float MIN_SPEED = SIZE_X / 5.0f;
+static const float MAX_SPEED = MIN_SPEED * 2.0f;
 
 // we're good here, no scaling necessary
-static const float MIN_SPAWN_DELAY = 0.1f;
-static const float MAX_SPAWN_DELAY = 0.2f;
+static const float MIN_SPAWN_DELAY = 0.001f;
+static const float MAX_SPAWN_DELAY = 0.001f;
 
-static const float MIN_BULLET_RADIUS = 0;
-static const float MAX_BULLET_RADIUS = 0;
+// how many
+static const float MIN_BULLET_RADIUS = SIZE_X / 5.0f;
+static const float MAX_BULLET_RADIUS = MIN_BULLET_RADIUS; // * 2.0f;
 
-static const float MIN_BULLET_LEN = 0;
-static const float MAX_BULLET_LEN = 0;
+static const float MIN_BULLET_LEN = SIZE_X / 5.0f;
+static const float MAX_BULLET_LEN = MIN_BULLET_LEN; // * 2.0f;
 
 #define FREELIST_END BULLET_POOL_SIZE
 #define IS_SPAWNED (BULLET_POOL_SIZE + 1)
@@ -51,6 +87,10 @@ typedef struct Freelist {
     size_t head;
     size_t tail;
 } Freelist;
+
+typedef struct BulletBox {
+    int min_x, max_x, min_y, max_y, min_z, max_z;
+} BulletBox;
 
 // ----------- ~%~ helper fn's ~%~ -----------
 
@@ -81,6 +121,64 @@ static inline float get_sign(int dir) {
     return dir & (PX | PY | PZ) ? 1.0f : -1.0f;
 }
 
+static inline float get_start_pos(int dir) {
+    switch (dir) {
+    case NX:
+        return X_MAX;
+    case PX:
+        return X_MIN;
+    case NY:
+        return Y_MAX;
+    case PY:
+        return Y_MIN;
+    case NZ:
+        return Z_MAX;
+    case PZ:
+        return Z_MIN;
+    default:
+        __builtin_unreachable();
+    }
+}
+
+static inline float get_random_grid_pos(int dim_count, float min_val) {
+    return min_val +
+           (float)(next_rand() % dim_count) * (CUBE_SIZE + CUBE_PADDING);
+}
+
+static inline int is_out_of_bounds(Vector3 pos, Vector3 scale, int dir) {
+    switch (dir) {
+    case PX:
+        return pos.x > (X_MAX + scale.x);
+    case NX:
+        return pos.x < (X_MIN - scale.x);
+    case PY:
+        return pos.y > (Y_MAX + scale.y);
+    case NY:
+        return pos.y < (Y_MIN - scale.y);
+    case PZ:
+        return pos.z > (Z_MAX + scale.z);
+    case NZ:
+        return pos.z < (Z_MIN - scale.z);
+    }
+    return 1;
+}
+
+static inline int world_to_index(float coord, float base_pos, int max_idx) {
+    int ret = (int)ceilf((coord - base_pos) / (CUBE_SIZE + CUBE_PADDING));
+    return ret > max_idx ? max_idx : ret < 0 ? 0 : ret;
+}
+
+static inline BulletBox get_bullet_bounding_box(Vector3 pos, Vector3 scale) {
+    return (BulletBox){
+        world_to_index(pos.x - scale.x, X_MIN_CUBE_CENTER, CUBES_X),
+        world_to_index(pos.x + scale.x, X_MIN_CUBE_CENTER, CUBES_X),
+        world_to_index(pos.y - scale.y, Y_MIN_CUBE_CENTER, CUBES_Y),
+        world_to_index(pos.y + scale.y, Y_MIN_CUBE_CENTER, CUBES_Y),
+        world_to_index(pos.z - scale.z, Z_MIN_CUBE_CENTER, CUBES_Z),
+        world_to_index(pos.z + scale.z, Z_MIN_CUBE_CENTER, CUBES_Z),
+    };
+}
+
 // ----------- ~%~ spawn logic ~%~ -----------
 
 static inline void init_freelist(Freelist *frie, Bullets *bullets) {
@@ -102,10 +200,11 @@ void free_bullet(Freelist *frie, Bullets *bullets, int idx) {
     frie->tail = idx;
 }
 
-void spawn_bullet(Freelist *frie, Bullets *bullets) {
+// returns index if bullet is spawned, BULLET_POOL_SIZE if not
+int spawn_bullet(Freelist *frie, Bullets *bullets) {
     // get next free bullet, if one is available
     if (frie->head == FREELIST_END)
-        return;
+        return FREELIST_END;
     size_t idx = frie->head;
     frie->head = bullets->next_free_or_spawned[idx];
     if (frie->head == FREELIST_END)
@@ -122,13 +221,22 @@ void spawn_bullet(Freelist *frie, Bullets *bullets) {
     float bullet_radius = next_randf(MIN_BULLET_RADIUS, MAX_BULLET_RADIUS);
     bullets->scales[idx] =
         (Vector3){bullet_radius, bullet_radius, bullet_radius};
-    bullets->positions[idx] = (Vector3){0}; // todo: this, with scaling in mind
+    bullets->positions[idx] =
+        (Vector3){get_random_grid_pos(CUBES_X, X_MIN_CUBE_CENTER),
+                  get_random_grid_pos(CUBES_Y, Y_MIN_CUBE_CENTER),
+                  get_random_grid_pos(CUBES_Z, Z_MIN_CUBE_CENTER)};
 
-    // grab 0,1,2 so when we cast Vector3 to float pointer we can point to the
-    // only axis we care about across multiple vectors
+    // grab x,y,z offset so we can point to the relevant axis across multiple
+    // Vector3's when they're casted to float*
     int xyz_idx = get_xyz(bullets->directions[idx]);
-    ((float *)&bullets->scales[idx])[xyz_idx] =
-        next_randf(MIN_BULLET_LEN, MAX_BULLET_LEN);
+
+    float *scale_xyz = &((float *)&bullets->scales[idx])[xyz_idx];
+    *scale_xyz = next_randf(MIN_BULLET_LEN, MAX_BULLET_LEN);
+
+    ((float *)&bullets->positions[idx])[xyz_idx] =
+        get_start_pos(bullets->directions[idx]) -
+        (*scale_xyz) * get_sign(bullets->directions[idx]);
+    return idx;
 }
 
 // ----------- ~%~ main ~%~ -----------
@@ -139,9 +247,29 @@ int main() {
     Freelist frie = {0};
     init_freelist(&frie, &bullets);
 
-    float dt = 0, spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
+    Vector3 cube_positions[CUBES_COUNT];
+    Vector3 ref_pos = {0.0f, 0.0f, Z_MIN_CUBE_CENTER};
+    for (int z = 0; z < CUBES_Z; z++) {
+        ref_pos.y = Y_MIN_CUBE_CENTER;
+        for (int y = 0; y < CUBES_Y; y++) {
+            ref_pos.x = X_MIN_CUBE_CENTER;
+            for (int x = 0; x < CUBES_X; x++) {
+                cube_positions[CUBE_IDX(x, y, z)] = ref_pos;
+                ref_pos.x += CUBE_SIZE + CUBE_PADDING;
+            }
+            ref_pos.y += CUBE_SIZE + CUBE_PADDING;
+        }
+        ref_pos.z += CUBE_SIZE + CUBE_PADDING;
+    }
 
-    char debug_text[100];
+    float dt = 0, spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
+    char debug_text[256];
+
+    Camera3D camera = {.position = {200.0f, 0.0f, 0.0f},
+                       .target = CENTER,
+                       .up = {0.0f, 1.0f, 0.0f},
+                       .fovy = 5.0f,
+                       .projection = CAMERA_PERSPECTIVE};
 
     // todo: make resizeable, use window_size as source of truth
     Vector2 window_size = {800, 600};
@@ -157,6 +285,14 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
         int bullet_count = 0;
+
+        // UpdateCamera(&camera, CAMERA_ORBITAL);
+        BeginMode3D(camera);
+        // debug: visualize cube grid
+        for (int i = 0; i < CUBES_COUNT; i++) {
+            DrawPoint3D(cube_positions[i], WHITE);
+        }
+
         for (int i = 0; i < BULLET_POOL_SIZE; i++) {
             if (bullets.next_free_or_spawned[i] != IS_SPAWNED)
                 continue;
@@ -165,7 +301,28 @@ int main() {
             int dir = bullets.directions[i];
             ((float *)&bullets.positions[i])[get_xyz(dir)] +=
                 get_sign(dir) * bullets.speeds[i] * dt;
+            if (is_out_of_bounds(bullets.positions[i], bullets.scales[i],
+                                 bullets.directions[i])) {
+                free_bullet(&frie, &bullets, i);
+                continue;
+            }
+            // debug: visualize bullet positions
+            // DrawPoint3D(bullets.positions[i], bullets.colors[i]);
+            DrawSphereEx(bullets.positions[i], CUBE_SIZE / 8.0f, 4, 4,
+                         bullets.colors[i]);
+
+            BulletBox bbox = get_bullet_bounding_box(bullets.positions[i],
+                                                     bullets.scales[i]);
+            for (int z = bbox.min_z; z < bbox.max_z; z++) {
+                for (int y = bbox.min_y; y < bbox.max_y; y++) {
+                    for (int x = bbox.min_x; x < bbox.max_x; x++) {
+                        DrawCubeWires(cube_positions[CUBE_IDX(x, y, z)], CUBE_SIZE,
+                                      CUBE_SIZE, CUBE_SIZE, bullets.colors[i]);
+                    }
+                }
+            }
         }
+        EndMode3D();
         sprintf(debug_text, "bullets: %d", bullet_count);
         DrawText(debug_text, 5, 5, 16, SKYBLUE);
         EndDrawing();
@@ -174,11 +331,16 @@ int main() {
     return 0;
 }
 
-
 /*
 
 Index Space -> World Space
 
 
+Octahedron equation: |x / scale_x| + |y / scale_y| + |z / scale_z| <= 1
+
+d = |(bul_x - cube_x) / scale_x| + |(bul_y - cube_y) / scale_y| + |(bul_z -
+cube_z) / scale_z|
+
+side_len = maxf(0.0f, CUBE_SIZE * (1 - d))
 
 */
