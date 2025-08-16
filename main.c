@@ -3,9 +3,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "raylib.h"
+#include "raymath.h"
 
 // ----------- ~%~ macros ~%~ -----------
 
@@ -14,15 +16,13 @@
 
 #define CENTER ((Vector3){0.0f, 0.0f, 0.0f})
 
-#define EPSILON 0.01f
-
 // cube constants
-#define CUBE_SIZE 0.5f
+#define CUBE_SIZE 1.0f
 #define CUBE_PADDING 0.1f
 
-#define CUBES_X 50
-#define CUBES_Y 50
-#define CUBES_Z 50
+#define CUBES_X 25
+#define CUBES_Y 25
+#define CUBES_Z 25
 #define CUBES_COUNT (CUBES_X * CUBES_Y * CUBES_Z)
 
 // note: SIZE_X is the scaling factor for bullet speed, radius, etc.
@@ -48,13 +48,13 @@
 #define CUBE_IDX(x, y, z) (CUBES_X * CUBES_Y * (z) + CUBES_X * (y) + (x))
 
 // bullet constants
-#define BULLET_POOL_SIZE 100
+#define BULLET_POOL_SIZE 32
 static const float MIN_SPEED = SIZE_X / 5.0f;
 static const float MAX_SPEED = MIN_SPEED * 2.0f;
 
 // we're good here, no scaling necessary
-static const float MIN_SPAWN_DELAY = 0.001f;
-static const float MAX_SPAWN_DELAY = 0.01f;
+static const float MIN_SPAWN_DELAY = 0.01f;
+static const float MAX_SPAWN_DELAY = 0.1f;
 
 // how many
 static const float MIN_BULLET_RADIUS = SIZE_X / 15.0f;
@@ -70,7 +70,7 @@ static const float MAX_BULLET_LEN = MIN_BULLET_LEN * 2.0f;
 
 typedef struct Bullets {
     Vector3 positions[BULLET_POOL_SIZE];
-    Color colors[BULLET_POOL_SIZE];
+    Vector4 colors[BULLET_POOL_SIZE];
     Vector3 scales[BULLET_POOL_SIZE];
     float speeds[BULLET_POOL_SIZE];
     size_t next_free_or_spawned[BULLET_POOL_SIZE];
@@ -207,7 +207,7 @@ void free_bullet(Freelist *frie, Bullets *bullets, int idx) {
 
 // returns index if bullet is spawned, BULLET_POOL_SIZE if not
 int spawn_bullet(Freelist *frie, Bullets *bullets) {
-    // get next free bullet, if one is available
+    // get next free bullet, if one is available, bail otherwise
     if (frie->head == FREELIST_END)
         return FREELIST_END;
     size_t idx = frie->head;
@@ -217,9 +217,11 @@ int spawn_bullet(Freelist *frie, Bullets *bullets) {
     bullets->next_free_or_spawned[idx] = IS_SPAWNED;
 
     // initialize bullet data
-    bullets->colors[idx] =
-        ColorLerp((Color){0xC7, 0x51, 0x08, 0xFF},
-                  (Color){0x61, 0x0C, 0xCF, 0xFF}, next_randf(0.0f, 1.0f));
+
+    bullets->colors[idx] = Vector4Lerp(
+        (Vector4){0xC7 / 255.0f, 0x51 / 255.0f, 0x08 / 255.0f, 1.0f},
+        (Vector4){0x61 / 255.0f, 0x0C / 255.0f, 0xCF / 255.0f, 1.0f},
+        next_randf(0.0f, 1.0f));
     bullets->directions[idx] = 1 << (next_rand() % DIR_LEN);
 
     bullets->speeds[idx] = next_randf(MIN_SPEED, MAX_SPEED);
@@ -246,12 +248,13 @@ int spawn_bullet(Freelist *frie, Bullets *bullets) {
 
 // ----------- ~%~ main ~%~ -----------
 
-int main() {
+int cpu_render() {
     // setup data
     Bullets bullets = {0};
     Freelist frie = {0};
     init_freelist(&frie, &bullets);
 
+    // TODO: change this to directly build transforms
     Vector3 cube_positions[CUBES_COUNT];
     Vector3 ref_pos = {0.0f, 0.0f, Z_MIN_CUBE_CENTER};
     for (int z = 0; z < CUBES_Z; z++) {
@@ -287,18 +290,17 @@ int main() {
             spawn_bullet(&frie, &bullets);
             spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
         }
-        BeginDrawing();
-        ClearBackground(BLACK);
         // debug: keep track of bullet count
         int bullet_count = 0;
-
-        // UpdateCamera(&camera, CAMERA_ORBITAL);
-        BeginMode3D(camera);
         // debug: visualize cube grid
         // for (int i = 0; i < CUBES_COUNT; i++) {
         //     DrawPoint3D(cube_positions[i], WHITE);
         // }
 
+        // UpdateCamera(&camera, CAMERA_ORBITAL);
+        BeginDrawing();
+        ClearBackground(BLACK);
+        BeginMode3D(camera);
         for (int i = 0; i < BULLET_POOL_SIZE; i++) {
             if (bullets.next_free_or_spawned[i] != IS_SPAWNED)
                 continue;
@@ -314,7 +316,9 @@ int main() {
             }
             // debug: visualize bullet positions
             // DrawSphereEx(bullets.positions[i], CUBE_SIZE / 8.0f, 4, 4,
-            //              bullets.colors[i]);
+            //              ColorFromNormalized(bullets.colors[i]));
+
+            // CPU RENDERING
 
             BulletBox bbox = get_bullet_bounding_box(bullets.positions[i],
                                                      bullets.scales[i]);
@@ -336,7 +340,7 @@ int main() {
                         // debug: bypass side length calc, show all cubes
                         // float side_len = CUBE_SIZE;
                         DrawCubeWires(*cube_pos, side_len, side_len, side_len,
-                                      bullets.colors[i]);
+                                      ColorFromNormalized(bullets.colors[i]));
                     }
                 }
             }
@@ -349,6 +353,115 @@ int main() {
     }
     CloseWindow();
     return 0;
+}
+
+int gpu_render() {
+    // setup data
+    Bullets bullets = {0};
+    Freelist frie = {0};
+    init_freelist(&frie, &bullets);
+
+    // TODO: change this to directly build transforms
+
+    Matrix transforms[CUBES_COUNT];
+    Vector3 ref_pos = {0.0f, 0.0f, Z_MIN_CUBE_CENTER};
+    for (int z = 0; z < CUBES_Z; z++) {
+        ref_pos.y = Y_MIN_CUBE_CENTER;
+        for (int y = 0; y < CUBES_Y; y++) {
+            ref_pos.x = X_MIN_CUBE_CENTER;
+            for (int x = 0; x < CUBES_X; x++) {
+                transforms[CUBE_IDX(x,y,z)] = MatrixTranslate(ref_pos.x, ref_pos.y, ref_pos.z);
+                ref_pos.x += CUBE_SIZE + CUBE_PADDING;
+            }
+            ref_pos.y += CUBE_SIZE + CUBE_PADDING;
+        }
+        ref_pos.z += CUBE_SIZE + CUBE_PADDING;
+    }
+
+    float dt = 0, spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
+    char debug_text[256];
+
+    Camera3D camera = {.position = {400.0f, 0.0f, 0.0f},
+                       .target = CENTER,
+                       .up = {0.0f, 1.0f, 0.0f},
+                       .fovy = 5.0f,
+                       .projection = CAMERA_PERSPECTIVE};
+
+    // todo: make resizeable, use window_size as source of truth
+    Vector2 window_size = {800, 600};
+    InitWindow(window_size.x, window_size.y, "hi");
+    SetTargetFPS(GetMonitorRefreshRate(GetCurrentMonitor()));
+
+    Mesh cube = GenMeshCube(1.0f, 1.0f, 1.0f);
+    Model cube_model = LoadModelFromMesh(cube);
+
+    Shader shader = LoadShader("cubegrid.vs", "cubegrid.fs");
+    if (!IsShaderValid(shader)) {
+        fprintf(stderr, "shader did an oopsie woopsie\n");
+        exit(1);
+    }
+    cube_model.materials[0].shader = shader;
+
+    while (!WindowShouldClose()) {
+        dt = GetFrameTime();
+        if ((spawn_timer -= dt) <= 0.0f) {
+            spawn_bullet(&frie, &bullets);
+            spawn_timer = next_randf(MIN_SPAWN_DELAY, MAX_SPAWN_DELAY);
+        }
+        
+        // GPU stuff TODO: see if I can't just use bullets struct directly
+        // instead of reassigning like this
+        Vector3 bulletPos[BULLET_POOL_SIZE];
+        Vector3 bulletScale[BULLET_POOL_SIZE];
+        Vector4 bulletColor[BULLET_POOL_SIZE];
+        
+        int bullet_count = 0;
+
+        for (int i = 0; i < BULLET_POOL_SIZE; i++) {
+            if (bullets.next_free_or_spawned[i] != IS_SPAWNED)
+                continue;
+            bullet_count++;
+
+            int dir = bullets.directions[i];
+            ((float *)&bullets.positions[i])[get_xyz(dir)] +=
+                get_sign(dir) * bullets.speeds[i] * dt;
+            if (is_out_of_bounds(bullets.positions[i], bullets.scales[i],
+                                 dir)) {
+                free_bullet(&frie, &bullets, i);
+                continue;
+            }
+            bulletPos[bullet_count] = bullets.positions[i];
+            bulletScale[bullet_count] = bullets.scales[i];
+            bulletColor[bullet_count] = bullets.colors[i];
+        }
+
+        SetShaderValue(shader, GetShaderLocation(shader, "uBulletCount"),
+                       &bullet_count, SHADER_UNIFORM_INT);
+        SetShaderValueV(shader, GetShaderLocation(shader, "uBulletPos"),
+                        bulletPos, SHADER_UNIFORM_VEC3, bullet_count);
+        SetShaderValueV(shader, GetShaderLocation(shader, "uBulletScale"),
+                        bulletScale, SHADER_UNIFORM_VEC3, bullet_count);
+        SetShaderValueV(shader, GetShaderLocation(shader, "uBulletColor"),
+                        bulletColor, SHADER_UNIFORM_VEC4, bullet_count);
+
+        // UpdateCamera(&camera, CAMERA_ORBITAL);
+        BeginDrawing();
+        ClearBackground(BLACK);
+        BeginMode3D(camera);
+        DrawMeshInstanced(cube, cube_model.materials[0], transforms,
+                          CUBES_COUNT);
+        EndMode3D();
+        // debug: show stats
+        sprintf(debug_text, "bullets: %d\nfps: %d", bullet_count, GetFPS());
+        DrawText(debug_text, 5, 5, 16, SKYBLUE);
+        EndDrawing();
+    }
+    CloseWindow();
+    return 0;
+}
+
+int main() {
+    return gpu_render();
 }
 
 /*
