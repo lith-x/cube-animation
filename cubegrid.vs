@@ -2,8 +2,8 @@
 precision highp float;
 
 in vec3 vertexPosition;
-in vec3 vertexNormal;
 in vec2 vertexTexCoord;
+in vec3 vertexNormal;
 
 // Instance transform (raylib provides this with DrawMeshInstanced)
 in mat4 instanceTransform;
@@ -20,7 +20,7 @@ out vec4 vColor;
 
 void main() {
     // Correct way to get cube center (translation column)
-    vec3 cubeCenter = vec3(instanceTransform[3].xyz);
+    vec3 cubeCenter = instanceTransform[3].xyz;
 
     float side_len = 0.2;
     vec4 color = vec4(0.0);
@@ -41,3 +41,20 @@ void main() {
     vec3 scaledPos = vertexPosition * side_len;
     gl_Position = mvp * instanceTransform * vec4(scaledPos, 1.0);
 }
+
+
+
+// precision highp float;
+
+// in vec3 vertexPosition;
+// in vec3 vertexNormal;
+// in vec2 vertexTexCoord;
+
+// uniform mat4 mvp;
+
+// out vec4 vColor;
+
+// void main() {
+//     vColor = vec4(1.0, 0.0, 0.0, 1.0); // solid red cube
+//     gl_Position = mvp * vec4(vertexPosition, 1.0);
+// }
